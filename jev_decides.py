@@ -1,5 +1,6 @@
 """Ask Jev (TypeSafe's decision model on OpenRouter) a yes/no question."""
 
+import get_desktop_state
 import json
 import sys
 import urllib.request
@@ -9,6 +10,8 @@ API_KEY = "sk-or-v1-b4bc639d053e2cb831174ac3537a0128a845d5dd7964a5e21b40b0f92e1d
 
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
+user_goal = input("What is your goal: ")
+yes_threshold = 50.0
 
 
 def decide(api_key: str, state: str, question: str, true_when: str,
@@ -58,15 +61,19 @@ def decide(api_key: str, state: str, question: str, true_when: str,
 
 
 if __name__ == "__main__":
+    # Detect what the user is doing right now (see get_desktop_state.py).
+    # Single-shot, no timers or polling yet — one run, one decision.
+    state = get_desktop_state.get_desktop_state(user_goal=user_goal)
+    get_desktop_state._print_state(state)
+
     result = decide(
         api_key=API_KEY,
-        state="",
-        question="Is this customer reporting a software defect?",
-        true_when="The customer describes broken or unexpected product behavior.",
-        false_when="The customer is asking a question or requesting a feature.",
-        yes_threshold=50.0,
+        state=json.dumps(state),
+        question="The user has set a goal for themselves to work on, and your job is to determine if what the user is currently doing is a distraction from that goal. Is what the user is currently doing a distraction from that goal? This is the goal that the user has set: \"" + user_goal + "\"",
+        true_when="The user is engaging in an activity that is not aligned with their stated goal.",
+        false_when="The user is engaging in an activity that is aligned with their stated goal.",
     )
 
     print(f"YES: {result['yes_percent']}%")
     print(f"NO:  {result['no_percent']}%")
-    print(f"Decision (threshold 50%): {result['answer']}")
+    print(f"Decision (threshold {yes_threshold}%): {result['answer']}")
