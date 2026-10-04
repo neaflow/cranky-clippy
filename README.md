@@ -79,8 +79,5 @@ python3 RUNTHISONE.py
 
 
 
-
-
-
-
 By the way; there are API keys in the git history. these have already been rotated. NO FREE API FOR YOU!!!
+Also, for anyone not viewing this from StormHacks 2026, yeah that's what this was for. this entire thing was made in 24 hours (less, even)
