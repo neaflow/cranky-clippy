@@ -12,8 +12,66 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget, QGraphicsDropShadow
 from PySide6.QtCore import Qt, QRect, QTimer, QPoint, QEvent, QAbstractNativeEventFilter
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath, QFontMetrics
 
-# Options: "happy", "sad", "default"
-CLIPPY_MOOD = "angry"
+# Options: "idle", "happy", "sad", "ticked-off", "angry", "very-angry"
+CLIPPY_MOOD = "very-angry"
+
+# Mood -> the animation played for that mood.
+#   "folder"    -> the asset folder inside "assets" holding that mood's frames.
+#   "frames"    -> the PNG files in that folder, in order.
+#   "durations" -> milliseconds each frame is held, one entry per frame.
+#   "intro"     -> optional one-off sequence played before "cycle" starts.
+#   "cycle"     -> the repeating sequence, as indexes into "frames".
+#   "loop"      -> True: repeat "cycle" forever.
+#                  False: stop on the last frame and hold it.
+MOOD_ANIMATIONS = {
+    "idle": {
+        "folder": "1. idle",
+        "frames": ["i-frame1.png", "i-frame2.png", "i-frame3.png", "i-frame4.png"],
+        "durations": [125, 125, 125, 125],
+        "cycle": [0, 1, 2, 3, 2, 1],
+        "loop": True,
+    },
+    "happy": {
+        "folder": "2. happy",
+        "frames": ["h-frame1.png", "h-frame2.png"],
+        "durations": [290, 600],
+        "cycle": [0, 1],
+        "loop": True,
+    },
+    "sad": {
+        "folder": "3. sad",
+        "frames": ["s-frame1.png", "s-frame2.png", "s-frame3.png"],
+        "durations": [200, 200, 200],
+        "cycle": [0, 1, 2, 1],
+        "loop": True,
+    },
+    "ticked-off": {
+        "folder": "4. ticked-off",
+        "frames": ["t-frame1.png", "t-frame2.png", "t-frame3.png",
+                   "t-frame4.png", "t-frame5.png"],
+        "durations": [125, 125, 125, 125, 125],
+        "cycle": [0, 1, 2, 3, 4],
+        "loop": False,
+    },
+    "angry": {
+        "folder": "5. angry",
+        "frames": ["a-frame1.png", "a-frame2.png", "a-frame3.png"],
+        "durations": [125, 125, 125],
+        "cycle": [0, 1, 2],
+        "loop": False,
+    },
+    "very-angry": {
+        "folder": "6. very-angry",
+        "frames": ["va-frame1.png", "va-frame2.png", "va-frame3.png",
+                   "va-frame4.png", "va-frame5.png", "va-frame6.png",
+                   "va-frame7.png"],
+        "durations": [200, 200, 200, 200, 200, 200, 200],
+        # The first pass includes frame 1; every later pass skips it.
+        "intro": [0, 1, 2, 3, 4, 5, 6],
+        "cycle": [1, 2, 3, 4, 5, 6],
+        "loop": True,
+    },
+}
 
 #size
 SCALE_FACTOR = 0.25
@@ -41,10 +99,13 @@ SWAY_VERTICAL_AMPLITUDE = 5   # pixels to move up/down
 SWAY_VERTICAL_DURATION = 1500  # milliseconds for one full up/down cycle
 
 #sway presets per mood
+# These are the program's original sway behaviours, remapped onto the current
+# mood names: old "happy" -> "idle", old "very-happy" -> "happy",
+# old "angry" -> "very-angry". Moods with no preset fall back to "idle".
 SWAY_PRESETS = {
-    "happy": {"amplitude": 10, "duration": 2000, "vertical_amplitude": 5,  "vertical_duration": 1500},
-    "very-happy":   {"amplitude": 5, "duration": 1200, "vertical_amplitude": 20, "vertical_duration": 800},
-    "angry":    {"amplitude": 15, "duration": 300,  "vertical_amplitude": 3, "vertical_duration": 200},
+    "idle":       {"amplitude": 10, "duration": 2000, "vertical_amplitude": 5,  "vertical_duration": 1500},
+    "happy":      {"amplitude": 5, "duration": 1200, "vertical_amplitude": 20, "vertical_duration": 800},
+    "very-angry": {"amplitude": 15, "duration": 300,  "vertical_amplitude": 3,  "vertical_duration": 200},
 }
 
 #message settings
@@ -142,7 +203,7 @@ class NativeEventFilter(QAbstractNativeEventFilter):
 
 
 class ClippyOverlay(QWidget):
-    """A frameless, always-on-top overlay showing clippy.png in the corner.
+    """A frameless, always-on-top overlay showing Clippy in the screen corner.
 
     Uses two separate windows:
       - This window (image) sways left/right.
@@ -161,50 +222,17 @@ class ClippyOverlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
 
-        # --- Determine which image to load based on CLIPPY_MOOD ---
-        mood_to_file = {
-            "happy": "clippy-happy.png",
-            "sad": "clippy-sad.png",
-            "angry": "clippy-angry.png",
-            "fully-ticked": "clippy-fully-ticked-off.png",
-            "little-mad": "clippy-little-mad.png",
-            "lvl2-mad": "clippy-ticked-off-level-2.png",
-            "lvl3-mad": "clippy-ticked-off-level-3.png",
-            "lvl4-mad": "clippy-ticked-off-level-4.png",
-            "ticked-off": "clippy-tickedoff.png",
-            "very-angry": "clippy-very-angry.png",
-            "very-happy": "clippy-very-happy.png",
-        }
-        # Fallback for moods without a dedicated image
-        if CLIPPY_MOOD in ("angry", "fully-ticked", "little-mad", "lvl2-mad", "lvl3-mad", "lvl4-mad", "ticked-off", "very-angry"):
-            image_file = "clippy.png"  # fallback to default image
-        image_file = mood_to_file.get(CLIPPY_MOOD, "clippy.png")
-        image_path = os.path.join(os.path.dirname(__file__), "assets", image_file)
-
-        if not os.path.exists(image_path):
-            print(f"[ERROR] {image_file} not found at: {image_path}")
-            print("Please place the image in the 'assets' folder next to this script.")
-            sys.exit(1)
-
-        pixmap = QPixmap(image_path)
-        if pixmap.isNull():
-            print(f"[ERROR] Failed to load {image_file} (corrupt or unsupported format).")
-            sys.exit(1)
-
-        # --- Scale the pixmap based on SCALE_FACTOR ---
-        scaled_pixmap = pixmap.scaled(
-            int(pixmap.width() * SCALE_FACTOR),
-            int(pixmap.height() * SCALE_FACTOR),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
+        # --- Load every frame of the current mood's animation ---
+        self._mood = CLIPPY_MOOD
+        self._mood_pixmaps = self._load_mood_frames(self._mood)
+        first_frame = self._mood_pixmaps[0]
 
         # --- Create the label that holds the image ---
         self.label = QLabel(self)
-        self.label.setPixmap(scaled_pixmap)
+        self.label.setPixmap(first_frame)
         self.label.setScaledContents(False)
-        self.label.setFixedSize(scaled_pixmap.size())
-        self.setFixedSize(scaled_pixmap.size())
+        self.label.setFixedSize(first_frame.size())
+        self.setFixedSize(first_frame.size())
 
         # --- Apply drop shadow to the image ---
         if SHADOW_ENABLED:
@@ -215,11 +243,19 @@ class ClippyOverlay(QWidget):
             self.label.setGraphicsEffect(shadow)
 
         # --- Store image size ---
-        self._win_width = scaled_pixmap.width()
-        self._win_height = scaled_pixmap.height()
+        self._win_width = first_frame.width()
+        self._win_height = first_frame.height()
+
+        # --- Frame animation state (driven by _anim_timer) ---
+        self._anim_steps = []        # flat [(frame index, duration ms), ...]
+        self._anim_loop_start = 0    # step index where the cycle begins
+        self._anim_index = 0         # step currently displayed
+        self._anim_loops = True      # False: hold the final frame
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._update_animation)
 
         # --- Apply sway preset based on mood ---
-        preset = SWAY_PRESETS.get(CLIPPY_MOOD, SWAY_PRESETS["happy"])
+        preset = SWAY_PRESETS.get(CLIPPY_MOOD, SWAY_PRESETS["idle"])
         self._sway_amplitude = preset["amplitude"]
         self._sway_duration = preset["duration"]
         self._sway_vertical_amplitude = preset["vertical_amplitude"]
@@ -266,6 +302,9 @@ class ClippyOverlay(QWidget):
         self._base_pos = QPoint(self.pos())
         if SWAY_ENABLED:
             self._start_sway()
+
+        # --- Start the current mood's frame animation ---
+        self._start_animation(self._mood)
 
         # --- Install event filter to catch key presses ---
         self.installEventFilter(self)
@@ -366,6 +405,96 @@ class ClippyOverlay(QWidget):
         else:
             self._text_label.setText(self._message[:self._displayed_chars])
 
+    def set_mood(self, mood):
+        """Switch Clippy to a different mood.
+
+        Stops the previous mood's animation, loads the new mood's frames and
+        starts its animation again from the beginning. Safe to call at any time.
+        """
+        self._anim_timer.stop()
+
+        self._mood = mood
+        self._mood_pixmaps = self._load_mood_frames(mood)
+
+        # All frames share one size, so this only matters if a mood's frames
+        # ever differ from the ones the window was sized for.
+        frame_size = self._mood_pixmaps[0].size()
+        if frame_size.width() != self._win_width or frame_size.height() != self._win_height:
+            self.label.setFixedSize(frame_size)
+            self.setFixedSize(frame_size)
+            self._win_width = frame_size.width()
+            self._win_height = frame_size.height()
+            self._position_windows()
+
+        self._start_animation(mood)
+
+    def _load_mood_frames(self, mood):
+        """Load and scale every frame of a mood's animation."""
+        spec = MOOD_ANIMATIONS.get(mood, MOOD_ANIMATIONS["idle"])
+        image_dir = os.path.join(os.path.dirname(__file__), "assets", spec["folder"])
+
+        if not os.path.isdir(image_dir):
+            print(f"[ERROR] Asset folder for mood '{mood}' not found: {image_dir}")
+            print("Expected one folder per mood inside 'assets', e.g. 'assets/1. idle'.")
+            sys.exit(1)
+
+        pixmaps = []
+        for image_file in spec["frames"]:
+            image_path = os.path.join(image_dir, image_file)
+            pixmap = QPixmap(image_path)
+            if pixmap.isNull():
+                print(f"[ERROR] Failed to load {image_path} (missing, corrupt or unsupported).")
+                sys.exit(1)
+
+            # --- Scale the pixmap based on SCALE_FACTOR ---
+            pixmaps.append(pixmap.scaled(
+                int(pixmap.width() * SCALE_FACTOR),
+                int(pixmap.height() * SCALE_FACTOR),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            ))
+
+        return pixmaps
+
+    def _start_animation(self, mood):
+        """Build the step list for a mood and show its first frame."""
+        spec = MOOD_ANIMATIONS.get(mood, MOOD_ANIMATIONS["idle"])
+        durations = spec["durations"]
+
+        # The optional "intro" is played once; "cycle" then repeats forever.
+        steps = []
+        for index in spec.get("intro", []):
+            steps.append((index, durations[index]))
+        loop_start = len(steps)
+        for index in spec["cycle"]:
+            steps.append((index, durations[index]))
+
+        self._anim_steps = steps
+        self._anim_loop_start = loop_start
+        self._anim_loops = spec["loop"]
+        self._show_step(0)
+
+    def _show_step(self, step):
+        """Display one step of the animation and time it."""
+        frame_index, duration = self._anim_steps[step]
+        self._anim_index = step
+        self.label.setPixmap(self._mood_pixmaps[frame_index])
+        self._anim_timer.start(duration)
+
+    def _update_animation(self):
+        """Advance to the next frame of the current mood's animation."""
+        next_step = self._anim_index + 1
+        if next_step < len(self._anim_steps):
+            self._show_step(next_step)
+            return
+
+        # End of the sequence: loop back to the start of the cycle, or stop
+        # and leave the final frame on screen.
+        if self._anim_loops:
+            self._show_step(self._anim_loop_start)
+        else:
+            self._anim_timer.stop()
+
     def _start_sway(self):
         """Start the left-right sway animation."""
         self._sway_timer = QTimer(self)
@@ -455,6 +584,7 @@ def main():
     print("[ClippyOverlay] Press 'S' to toggle swaying animation.")
     print(f"[ClippyOverlay] Message: \"{MESSAGE}\"")
     print("[ClippyOverlay] Call overlay.show_message(\"new text\") to change it.")
+    print("[ClippyOverlay] Call overlay.set_mood(\"idle\") to change mood.")
     sys.exit(app.exec())
 
 
