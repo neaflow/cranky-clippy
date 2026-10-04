@@ -20,19 +20,19 @@ from PySide6.QtCore import (
     QByteArray, QBuffer, QIODevice, QUrl,
 )
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QFontMetrics, QImage, QShortcut, QKeySequence
+from local_secrets import get_secret
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 except ImportError:  # optional audio module; Clippy remains fully usable without it
     QAudioOutput = QMediaPlayer = None
 
 IS_WINDOWS = sys.platform == "win32"
-gemini_api_key = "AQ.Ab8RN6K7dFwTL1Fkc5ljmOCk_lwkYzDAWSFF_V-SsYETR4zmjg"
-elevenlabs_api_key = "sk_2c355f57b72a1a986109df1da01a376fd6893baab36b8a28"
+gemini_api_key = get_secret("GEMINI_API_KEY")
+elevenlabs_api_key = get_secret("ELEVENLABS_API_KEY")
 
 if IS_WINDOWS:
     user32 = ctypes.windll.user32
 
-    # Window-action constants used by the foreground-window controls.
     WM_CLOSE = 0x0010
     SW_MINIMIZE = 6
 else:
@@ -40,16 +40,9 @@ else:
 
 # Options: "idle", "happy", "sad", "ticked-off", "angry", "very-angry"
 CLIPPY_MOOD = "idle"
-big_idle = 1
+big_idle = 0
 
-# Mood -> the animation played for that mood.
-#   "folder"    -> the asset folder inside "assets" holding that mood's frames.
-#   "frames"    -> the PNG files in that folder, in order.
-#   "durations" -> milliseconds each frame is held, one entry per frame.
-#   "intro"     -> optional one-off sequence played before "cycle" starts.
-#   "cycle"     -> the repeating sequence, as indexes into "frames".
-#   "loop"      -> True: repeat "cycle" forever.
-#                  False: stop on the last frame and hold it.
+
 MOOD_ANIMATIONS = {
     "idle": {
         "folder": "1. idle",
@@ -679,6 +672,7 @@ class ClippyOverlay(QWidget):
         self._speech_pending = False
         self._speech_playing = False
         self._speech_attempted = False
+        self._happy_reset_waiting_for_speech = False
         self._speech_buffer = None
         self._speech_bridge = SpeechResultBridge(self)
         self._speech_bridge.ready.connect(self._play_spoken_message)
@@ -1060,6 +1054,8 @@ class ClippyOverlay(QWidget):
         self._speech_pending = False
         self._speech_playing = False
         self._speech_attempted = False
+        self._happy_reset_waiting_for_speech = False
+        self._happy_reset_timer.stop()
         if self._speech_player is not None:
             try:
                 self._speech_player.stop()
@@ -1103,6 +1099,7 @@ class ClippyOverlay(QWidget):
                       file=sys.stderr)
                 self._speech_error_logged = True
             self._maybe_finish_auto_return()
+            self._maybe_finish_happy_reset()
             return
         try:
             if self._speech_buffer is not None:
@@ -1123,6 +1120,7 @@ class ClippyOverlay(QWidget):
             print("[ClippyOverlay] Optional speech playback disabled: %s" % exc,
                   file=sys.stderr)
             self._maybe_finish_auto_return()
+            self._maybe_finish_happy_reset()
 
     def _on_speech_error(self, error, error_string):
         if QMediaPlayer is not None and error != QMediaPlayer.Error.NoError:
@@ -1134,6 +1132,7 @@ class ClippyOverlay(QWidget):
                       file=sys.stderr)
                 self._speech_error_logged = True
             self._maybe_finish_auto_return()
+            self._maybe_finish_happy_reset()
 
     def _on_speech_media_status(self, status):
         if (
@@ -1145,6 +1144,17 @@ class ClippyOverlay(QWidget):
             self._speech_buffer = None
             self._speech_playing = False
             self._maybe_finish_auto_return()
+            self._maybe_finish_happy_reset()
+
+    def _maybe_finish_happy_reset(self):
+        """Start the happy hold timer only after its spoken line has completed."""
+        if not self._happy_reset_waiting_for_speech:
+            return
+        if self._speech_pending or self._speech_playing:
+            self._happy_reset_timer.stop()
+            return
+        self._happy_reset_waiting_for_speech = False
+        self._happy_reset_timer.start(HAPPY_RESET_MS)
 
     def _maybe_finish_auto_return(self):
         """Only let final-stage Clippy return to idle after its voice finishes."""
@@ -1286,6 +1296,7 @@ class ClippyOverlay(QWidget):
                 )
                 if self._persistent_happy:
                     self._happy_reset_timer.stop()
+                    self._happy_reset_waiting_for_speech = False
                 self.set_mood(mood)
             return
         if command.get("action") == "auto_returned":
@@ -1309,6 +1320,7 @@ class ClippyOverlay(QWidget):
         self._gemini_request_id += 1
         request_id = self._gemini_request_id
         self._happy_reset_timer.stop()
+        self._happy_reset_waiting_for_speech = False
         self._final_return_reset_timer.stop()
         self._excuse_ack_timer.stop()
         if not final_return_command:
@@ -1381,7 +1393,8 @@ class ClippyOverlay(QWidget):
         if event == "on_task":
             self._episode_active = False
             if not self._persistent_happy:
-                self._happy_reset_timer.start(HAPPY_RESET_MS)
+                self._happy_reset_waiting_for_speech = True
+                self._maybe_finish_happy_reset()
         elif final_return:
             self._maybe_finish_auto_return()
 
@@ -1392,6 +1405,7 @@ class ClippyOverlay(QWidget):
         self._episode_active = False
         self._auto_returned = False
         self._persistent_happy = False
+        self._happy_reset_waiting_for_speech = False
         self._last_pet_final_return = False
         self._excuse_ack_timer.stop()
         self._hide_excuse_entry()

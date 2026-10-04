@@ -9,7 +9,7 @@ import tempfile
 import app_catalog as catalog
 import get_desktop_state as desktop
 import jev_decides
-import jev_overlay
+import RUNTHISONE as jev_overlay
 
 
 class FocusDurationTests(unittest.TestCase):

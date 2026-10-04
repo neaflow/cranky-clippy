@@ -3,7 +3,7 @@ seconds whether what you're doing right now is a distraction from it.
 
 - Lives in the top-right corner and stays above all other windows even when
   unfocused, so the activity detector (get_desktop_state.py) keeps seeing
-  your real focused app — this widget is never the focused window while it
+  your real focused app - this widget is never the focused window while it
   just displays.
 - While the overlay itself *is* the focused window (i.e. you just clicked
   into it, e.g. to edit the goal), polling pauses with a "click away"
@@ -126,6 +126,8 @@ class GoalOverlay:
         self._escalation_started_at = None
         self._escalation_stage = -1
         self._brief_checkin_expired = False
+        self._collapsed = False
+        self._collapsed_pack_info = {}
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.goal_entry = tk.Entry(
@@ -141,12 +143,25 @@ class GoalOverlay:
         )
         self.goal_entry.bind("<Return>", lambda e: self._on_set_goal())
         self.goal_entry.pack(padx=10, pady=(8, 2))
+        self.goal_actions = tk.Frame(root, bg=BG)
         self.set_btn = tk.Button(
-            root, text="watch my goals", command=self._on_change_goal,
+            self.goal_actions, text="watch my goals", command=self._on_change_goal,
             bg="#33304a", fg=FG, activebackground="#4a4468",
             activeforeground=FG, relief="flat", font=("DejaVu Sans", 8),
         )
-        self.set_btn.pack(padx=10, pady=2)
+        self.set_btn.pack(side="left", padx=(10, 3), pady=2)
+        self.collapse_btn = tk.Button(
+            self.goal_actions, text="collapse", command=self._collapse_window,
+            bg="#33304a", fg=FG, activebackground="#4a4468",
+            activeforeground=FG, relief="flat", font=("DejaVu Sans", 8),
+        )
+        self.collapse_btn.pack(side="left", padx=(3, 10), pady=2)
+        self.goal_actions.pack()
+        self.expand_btn = tk.Button(
+            root, text="expand", command=self._expand_window,
+            bg="#33304a", fg=FG, activebackground="#4a4468",
+            activeforeground=FG, relief="flat", font=("DejaVu Sans", 8),
+        )
 
         self.goal_label = tk.Label(
             root, text="", bg=BG, fg=MUT, font=("DejaVu Sans", 8),
@@ -185,6 +200,41 @@ class GoalOverlay:
 
         self.goal_entry.focus_set()
 
+    def _reanchor_window(self):
+        self.root.update_idletasks()
+        width = max(1, self.root.winfo_reqwidth())
+        x = self.root.winfo_screenwidth() - width - 24
+        self.root.geometry(f"+{x}+40")
+
+    def _pack_if_expanded(self, widget, **options):
+        if not self._collapsed and not widget.winfo_manager():
+            widget.pack(**options)
+
+    def _collapse_window(self):
+        if self._collapsed:
+            return
+        self._collapsed_pack_info = {}
+        for widget in self.root.winfo_children():
+            if widget is self.expand_btn:
+                continue
+            if widget.winfo_manager() == "pack":
+                self._collapsed_pack_info[widget] = widget.pack_info()
+                widget.pack_forget()
+        self._collapsed = True
+        self.expand_btn.pack(padx=4, pady=4)
+        self._reanchor_window()
+
+    def _expand_window(self):
+        if not self._collapsed:
+            return
+        self.expand_btn.pack_forget()
+        self._collapsed = False
+        for widget, options in self._collapsed_pack_info.items():
+            if not widget.winfo_manager():
+                widget.pack(**options)
+        self._collapsed_pack_info = {}
+        self._reanchor_window()
+
     def _prefill_goal(self, goal):
         """Goal given on the command line: fill the entry quietly."""
         self.goal_entry.delete(0, tk.END)
@@ -203,12 +253,12 @@ class GoalOverlay:
         self._start_pet_process()
         self.goal_label.config(text=f'goal: "{goal}"')
         if not self.goal_label.winfo_ismapped():
-            self.goal_label.pack(padx=10, pady=(8, 0))
+            self._pack_if_expanded(self.goal_label, padx=10, pady=(8, 0))
         self.set_btn.config(text="change goal")
         # hide the entry while a goal is active to keep the widget tiny
         self.goal_entry.pack_forget()
-        self.status_label.pack(padx=10, pady=(4, 0))
-        self.status_label.config(text="click another window — checking…")
+        self._pack_if_expanded(self.status_label, padx=10, pady=(4, 0))
+        self.status_label.config(text="click another window - checking...")
         if self._worker is None:
             self._stop = False
             self._worker = threading.Thread(target=self._poll_loop, daemon=True)
@@ -722,7 +772,7 @@ class GoalOverlay:
             self.goal_entry.delete(0, tk.END)
             self.goal_entry.insert(0, getattr(self, "goal", ""))
             self.goal_entry.config(fg=FG)
-            self.goal_entry.pack(padx=10, pady=(8, 2))
+            self._pack_if_expanded(self.goal_entry, padx=10, pady=(8, 2))
             self.goal_entry.focus_set()
 
     def _poll_loop(self):
@@ -778,16 +828,16 @@ class GoalOverlay:
             ) == OVERLAY_TITLE:
                 # paused: keep the last verdict on screen, just explain why
                 # the numbers are not refreshing
-                self.status_label.config(text="paused — click into your work, not me")
+                self.status_label.config(text="paused - click into your work, not me")
                 checked = "last check skipped (paused) %s" % time.strftime("%H:%M:%S")
             else:
                 self.status_label.config(
-                    text=f"checking every {POLL_SECONDS}s · {focused}"
+                    text=f"checking every {POLL_SECONDS}s | {focused}"
                 )
                 checked = f"last checked {time.strftime('%H:%M:%S')}"
         else:
             self.status_label.config(
-                text=f"checking every {POLL_SECONDS}s · {focused}"
+                text=f"checking every {POLL_SECONDS}s | {focused}"
             )
             yes = result.get("on_track_percent", 0)
             no = result.get("not_on_track_percent", 0)
@@ -801,9 +851,9 @@ class GoalOverlay:
             self._update_pet_state(state, result, brief_check_in)
             self.result_label.config(
                 text=(
-                    "✅ ON TRACK" if verdict.startswith("YES")
-                    else "✅ BRIEF CHECK-IN" if brief_check_in
-                    else "⚠️ NOT SHOWN ON-TASK"
+                    "ON TRACK" if verdict.startswith("YES")
+                    else "BRIEF CHECK-IN" if brief_check_in
+                    else "NOT SHOWN ON-TASK"
                 ),
                 fg=NO if verdict.startswith("YES") or brief_check_in else YES,
             )
@@ -814,17 +864,17 @@ class GoalOverlay:
             checked = f"last checked {time.strftime('%H:%M:%S')}"
 
         if not self.percents_label.winfo_ismapped():
-            self.status_label.pack(padx=10, pady=(6, 0))
-            self.result_label.pack(padx=10, pady=(2, 0))
-            self.percents_label.pack(padx=10)
-            self.details_label.pack(padx=10, pady=(0, 6))
+            self._pack_if_expanded(self.status_label, padx=10, pady=(6, 0))
+            self._pack_if_expanded(self.result_label, padx=10, pady=(2, 0))
+            self._pack_if_expanded(self.percents_label, padx=10)
+            self._pack_if_expanded(self.details_label, padx=10, pady=(0, 6))
         self.details_label.config(text=checked)
 
         self._render_panel(state)
 
     def _render_panel(self, state):
         """Bottom panel with everything the detector saw, pretty-printed."""
-        self.state_header.config(text="— exact state context sent to Jev —")
+        self.state_header.config(text="-- exact state context sent to Jev --")
         text = json.dumps(state, indent=2, ensure_ascii=False)
         self.state_text.config(state="normal")
         self.state_text.delete("1.0", tk.END)
@@ -834,8 +884,8 @@ class GoalOverlay:
         self.state_text.config(height=min(lines, 38), width=46)
         self.state_text.config(state="disabled")
         if not self.state_text.winfo_ismapped():
-            self.state_header.pack(padx=10, pady=(0, 2))
-            self.state_text.pack(padx=6, pady=(0, 8))
+            self._pack_if_expanded(self.state_header, padx=10, pady=(0, 2))
+            self._pack_if_expanded(self.state_text, padx=6, pady=(0, 8))
             # make sure the whole widget still fits: re-anchor to the
             # top-right after the panel changes the window size
             self.root.update_idletasks()
@@ -845,7 +895,7 @@ class GoalOverlay:
 
     def _show_error(self, message):
         short = message[:120].replace("\n", " ")
-        self.result_label.config(text="⚠️ error", fg=YES)
+        self.result_label.config(text="ERROR", fg=YES)
         self.percents_label.config(text=short, fg=MUT)
 
 

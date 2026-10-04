@@ -7,9 +7,9 @@ import urllib.parse
 import urllib.request
 
 from app_catalog import WEBAPP_CATEGORIES, WEBAPP_DESCRIPTIONS
+from local_secrets import get_secret
 
-# Prototype-only key. This was previously hard-coded in the project.
-API_KEY = "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"
+API_KEY = get_secret("OPENROUTER_API_KEY")
 
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
