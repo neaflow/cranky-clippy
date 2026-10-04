@@ -34,6 +34,23 @@ NO = "#5fd37a"
 MUT = "#a89fc0"
 
 
+BRIEF_CHECKIN_APP_CLASSES = frozenset({"chat", "collaboration", "desktop", "email"})
+BRIEF_CHECKIN_MAX_SECONDS = 45.0
+
+
+def _is_brief_checkin(universal, webapp=None):
+    """Hard-coded short-dwell allowance for chat, utilities, and email."""
+    elapsed = universal.get("time_since_window_focused")
+    return (
+        (
+            universal.get("app_class") in BRIEF_CHECKIN_APP_CLASSES
+            or (webapp or {}).get("category") == "email"
+        )
+        and isinstance(elapsed, (int, float))
+        and 0 <= elapsed <= BRIEF_CHECKIN_MAX_SECONDS
+    )
+
+
 class GoalOverlay:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -160,7 +177,11 @@ class GoalOverlay:
     def _tick(self):
         self._inflight = True
         try:
-            state = get_desktop_state.get_desktop_state(user_goal=self.goal)
+            detected_state = get_desktop_state.get_desktop_state(user_goal=self.goal)
+            jev_state_json = jev_decides.prepare_state_for_jev(
+                json.dumps(detected_state, ensure_ascii=False)
+            )
+            state = json.loads(jev_state_json)
             universal = state.get("universal", {})
             # never judge ourselves, and never judge a focus-less desktop:
             # if the overlay is what's focused or nothing is focused at
@@ -172,17 +193,12 @@ class GoalOverlay:
             self.root.after(0, self._render, state, None)
             if paused:
                 return
+            prompt = jev_decides.goal_alignment_prompt(self.goal)
             result = jev_decides.decide(
                 api_key=jev_decides.API_KEY,
-                state=json.dumps(state),
-                question=(
-                    "The user has set a goal for themselves to work on, and your job is to "
-                    "determine if what the user is currently doing is a distraction from "
-                    "that goal. Is what the user is currently doing a distraction from that "
-                    'goal? This is the goal that the user has set: "' + self.goal + '"'
-                ),
-                true_when="The user is engaging in an activity that is not aligned with their stated goal.",
-                false_when="The user is engaging in an activity that is aligned with their stated goal.",
+                state=jev_state_json,
+                **prompt,
+                state_prepared=True,
             )
             self.root.after(0, self._render, state, result)
         except Exception as e:
@@ -212,15 +228,24 @@ class GoalOverlay:
             self.status_label.config(
                 text=f"checking every {POLL_SECONDS}s · {focused}"
             )
-            yes = result.get("yes_percent", 0)
-            no = result.get("no_percent", 0)
+            yes = result.get("on_track_percent", 0)
+            no = result.get("not_on_track_percent", 0)
             verdict = result.get("answer", "?")
+            brief_check_in = (
+                not verdict.startswith("YES")
+                and _is_brief_checkin(universal, state.get("webapp"))
+            )
             self.result_label.config(
-                text=("🚨 DISTRACTION" if verdict.startswith("YES") else "✅ on track"),
-                fg=YES if verdict.startswith("YES") else NO,
+                text=(
+                    "✅ ON TRACK" if verdict.startswith("YES")
+                    else "✅ BRIEF CHECK-IN" if brief_check_in
+                    else "⚠️ NOT SHOWN ON-TASK"
+                ),
+                fg=NO if verdict.startswith("YES") or brief_check_in else YES,
             )
             self.percents_label.config(
-                text=f"yes: {yes}%   no: {no}%", fg=(YES if yes >= no else NO)
+                text=f"on-track: {yes}%   not on-task: {no}%",
+                fg=(NO if verdict.startswith("YES") or brief_check_in else YES),
             )
             checked = f"last checked {time.strftime('%H:%M:%S')}"
 
@@ -235,7 +260,7 @@ class GoalOverlay:
 
     def _render_panel(self, state):
         """Bottom panel with everything the detector saw, pretty-printed."""
-        self.state_header.config(text="— what the detector saw —")
+        self.state_header.config(text="— exact state context sent to Jev —")
         text = json.dumps(state, indent=2, ensure_ascii=False)
         self.state_text.config(state="normal")
         self.state_text.delete("1.0", tk.END)

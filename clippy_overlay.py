@@ -8,19 +8,27 @@ import os
 import math
 import ctypes
 from ctypes import wintypes
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget, QGraphicsDropShadowEffect
 from PySide6.QtCore import Qt, QRect, QTimer, QPoint, QEvent, QAbstractNativeEventFilter
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QPainterPath, QFontMetrics
 
 # Options: "happy", "sad", "default"
-CLIPPY_MOOD = "happy"
+CLIPPY_MOOD = "angry"
 
 #size
-SCALE_FACTOR = 0.75
+SCALE_FACTOR = 0.25
 
 #position
 POSITION = "bottom-right"
-MARGIN = 20
+MARGIN = 0
+IMAGE_X_OFFSET = 190  # extra pixels to shift the image right (can be negative to go left)
+
+#drop shadow
+SHADOW_ENABLED = True
+SHADOW_BLUR_RADIUS = 15
+SHADOW_COLOR = "#000000"
+SHADOW_OFFSET_X = 5
+SHADOW_OFFSET_Y = 5
 
 #swaying animation (toggle)
 SWAY_ENABLED = True
@@ -31,6 +39,13 @@ SWAY_DURATION = 2000  # milliseconds for one full sway cycle
 SWAY_VERTICAL_ENABLED = True
 SWAY_VERTICAL_AMPLITUDE = 5   # pixels to move up/down
 SWAY_VERTICAL_DURATION = 1500  # milliseconds for one full up/down cycle
+
+#sway presets per mood
+SWAY_PRESETS = {
+    "happy": {"amplitude": 10, "duration": 2000, "vertical_amplitude": 5,  "vertical_duration": 1500},
+    "very-happy":   {"amplitude": 5, "duration": 1200, "vertical_amplitude": 20, "vertical_duration": 800},
+    "angry":    {"amplitude": 15, "duration": 300,  "vertical_amplitude": 3, "vertical_duration": 200},
+}
 
 #message settings
 MESSAGE = "Hey, It's me, It's Clippy!"
@@ -150,8 +165,19 @@ class ClippyOverlay(QWidget):
         mood_to_file = {
             "happy": "clippy-happy.png",
             "sad": "clippy-sad.png",
-            "default": "clippy.png",
+            "angry": "clippy-angry.png",
+            "fully-ticked": "clippy-fully-ticked-off.png",
+            "little-mad": "clippy-little-mad.png",
+            "lvl2-mad": "clippy-ticked-off-level-2.png",
+            "lvl3-mad": "clippy-ticked-off-level-3.png",
+            "lvl4-mad": "clippy-ticked-off-level-4.png",
+            "ticked-off": "clippy-tickedoff.png",
+            "very-angry": "clippy-very-angry.png",
+            "very-happy": "clippy-very-happy.png",
         }
+        # Fallback for moods without a dedicated image
+        if CLIPPY_MOOD in ("angry", "fully-ticked", "little-mad", "lvl2-mad", "lvl3-mad", "lvl4-mad", "ticked-off", "very-angry"):
+            image_file = "clippy.png"  # fallback to default image
         image_file = mood_to_file.get(CLIPPY_MOOD, "clippy.png")
         image_path = os.path.join(os.path.dirname(__file__), "assets", image_file)
 
@@ -180,9 +206,24 @@ class ClippyOverlay(QWidget):
         self.label.setFixedSize(scaled_pixmap.size())
         self.setFixedSize(scaled_pixmap.size())
 
+        # --- Apply drop shadow to the image ---
+        if SHADOW_ENABLED:
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(SHADOW_BLUR_RADIUS)
+            shadow.setColor(QColor(SHADOW_COLOR))
+            shadow.setOffset(SHADOW_OFFSET_X, SHADOW_OFFSET_Y)
+            self.label.setGraphicsEffect(shadow)
+
         # --- Store image size ---
         self._win_width = scaled_pixmap.width()
         self._win_height = scaled_pixmap.height()
+
+        # --- Apply sway preset based on mood ---
+        preset = SWAY_PRESETS.get(CLIPPY_MOOD, SWAY_PRESETS["happy"])
+        self._sway_amplitude = preset["amplitude"]
+        self._sway_duration = preset["duration"]
+        self._sway_vertical_amplitude = preset["vertical_amplitude"]
+        self._sway_vertical_duration = preset["vertical_duration"]
 
         # --- Create the text window (separate, does NOT sway) ---
         self._text_window = QWidget()
@@ -243,22 +284,22 @@ class ClippyOverlay(QWidget):
 
         # --- Position image window ---
         if POSITION == "bottom-right":
-            x = screen_geo.right() - self._win_width - MARGIN
+            x = screen_geo.right() - self._win_width - MARGIN + IMAGE_X_OFFSET
             y = screen_geo.bottom() - self._win_height - MARGIN
         elif POSITION == "bottom-left":
-            x = screen_geo.left() + MARGIN
+            x = screen_geo.left() + MARGIN + IMAGE_X_OFFSET
             y = screen_geo.bottom() - self._win_height - MARGIN
         elif POSITION == "top-right":
-            x = screen_geo.right() - self._win_width - MARGIN
+            x = screen_geo.right() - self._win_width - MARGIN + IMAGE_X_OFFSET
             y = screen_geo.top() + MARGIN
         elif POSITION == "top-left":
-            x = screen_geo.left() + MARGIN
+            x = screen_geo.left() + MARGIN + IMAGE_X_OFFSET
             y = screen_geo.top() + MARGIN
         elif POSITION == "center":
-            x = screen_geo.center().x() - self._win_width // 2
+            x = screen_geo.center().x() - self._win_width // 2 + IMAGE_X_OFFSET
             y = screen_geo.center().y() - self._win_height // 2
         else:
-            x = screen_geo.right() - self._win_width - MARGIN
+            x = screen_geo.right() - self._win_width - MARGIN + IMAGE_X_OFFSET
             y = screen_geo.bottom() - self._win_height - MARGIN
 
         self.move(x, y)
@@ -335,8 +376,8 @@ class ClippyOverlay(QWidget):
     def _update_sway(self):
         """Update sway position using sine waves (image only, text stays still)."""
         self._sway_time += 16
-        offset_x = SWAY_AMPLITUDE * math.sin(2 * math.pi * self._sway_time / SWAY_DURATION)
-        offset_y = SWAY_VERTICAL_AMPLITUDE * math.sin(2 * math.pi * self._sway_time / SWAY_VERTICAL_DURATION)
+        offset_x = self._sway_amplitude * math.sin(2 * math.pi * self._sway_time / self._sway_duration)
+        offset_y = self._sway_vertical_amplitude * math.sin(2 * math.pi * self._sway_time / self._sway_vertical_duration)
         self.move(int(self._base_pos.x() + offset_x), int(self._base_pos.y() + offset_y))
 
     def _stop_sway(self):

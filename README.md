@@ -7,18 +7,28 @@ If you find yourself getting easily distracted from the study/work goals that yo
 
 TO DO:
 Front-end:
-    -speech text
-    -min windows
-    -text-to-speech
-    -closing windows
+    v/-speech text
+    v/-min windows
+    -text-to-speech - ELEVENS add-on
+    v/-closing windows
     -increase shaking based on mood
     -intro animation
     -opening mini windows
     -animations
     -draggable? 
+    -workable on windows
     -workable on mac
     -workable on linix
     (If time):
     -barrel roll easter-egg
 
 Back-end:
+
+
+Main to-do:
+-ELEVENS add-on
+-Connect back-end to front-end
+
+Morning stuff:
+-clean code
+-Make backend and frontend work on windows, mac, and linix
