@@ -93,6 +93,8 @@ APP_METADATA = {
         "neovim": ["file_path", "buffer_name"],
         "emacs": ["file_path", "buffer_name"],
         "zed": ["workspace_name", "file_path", "git_branch"],
+        # KDE full IDE with its own window chrome
+        "kate": ["file_path", "document_name"],
         "cursor": ["workspace_name", "file_path", "git_branch", "chat_history_snippet"],
         "windsurf": ["workspace_name", "file_path", "git_branch", "chat_history_snippet"],
     },
@@ -106,6 +108,10 @@ APP_METADATA = {
         "gog_galaxy": ["game_name", "game_running"],
         "minecraft": ["server_name_or_singleplayer", "session_state", "time_in_game"],
         "roblox": ["experience_name", "game_running"],
+        # alternative store / installer front ends
+        "heroic": ["store_page_url", "game_name", "game_running"],
+        # game streaming front ends (Moonlight, GeForce Now style)
+        "moonlight": ["host_name", "game_name", "connection_state"],
     },
     # CLASS: chat / social (native apps). The app is usually the distraction
     # itself, so only the basics plus whether a call is active.
@@ -128,8 +134,7 @@ APP_METADATA = {
         "texstudio": ["file_path"],
         # document *viewer*, same treatment
         "okular": ["document_name", "file_path", "page_number"],
-    },
-    # CLASS: desktop utilities — the apps standard to a computer: file
+    },    # CLASS: desktop utilities — the apps standard to a computer: file
     # manager, settings, information tools, system utilities. KDE for now;
     # GNOME / other DEs / Windows / macOS later.
     "desktop": {
@@ -138,6 +143,15 @@ APP_METADATA = {
         # settings apps: which panel they have open
         "systemsettings": ["panel_name"],
         "kinfocenter": ["panel_name"],
+        # terminal: which session/shell title
+        "konsole": ["tab_name"],
+        # image viewer / editor
+        "gwenview": ["image_name"],
+        "kolourpaint": ["image_name"],
+        # git front end: which repo is open
+        "github-desktop": ["repo_name"],
+        # vpn front end: which panel
+        "nordvpn": ["panel_name"],
         # archive manager
         "ark": ["archive_name"],
         # screenshot tool: which capture mode is being prepared
@@ -174,6 +188,7 @@ WEBAPP_METADATA = {
     # Documents / productivity sites.
     "docs.google.com": ["document_name", "editor_active", "tab_focus_seconds"],
     "notion.so": ["page_name", "page_type", "tab_focus_seconds"],
+    "notion.com": ["page_name", "page_type", "tab_focus_seconds"],
     "overleaf.com": ["project_name", "file_path", "tab_focus_seconds"],
     "classroom.google.com": ["class_name", "assignment_name"],
     # Generic site / not in the list above: browser fields only.
@@ -220,6 +235,11 @@ APP_ALIASES = {
     "zenbrowser": "zen",
     "waterfox-current": "waterfox",
     "waterfox-classic": "waterfox",
+    "nordvpn-gui": "nordvpn",
+    "hgl": "heroic",   # Heroic Games Launcher flatpak window class
+    "visual-studio-code": "code",
+    "github desktop": "github-desktop",
+    "githubdesktop": "github-desktop",
 }
 
 # Gecko soft-forks keep Firefox's sessionstore format and layout exactly,
@@ -244,6 +264,26 @@ _DESKTOP_APP_DISPLAY_NAMES = {
     "discover": {"discover", "software center"},
     "kdeconnect": {"kde connect", "kdeconnect"},
     "partitionmanager": {"kde partition manager"},
+    "konsole": {"konsole", "terminal"},
+    "kolourpaint": {"kolourpaint", "kolour paint"},
+    "gwenview": {"gwenview"},
+    "github-desktop": {"github desktop", "githubdesktop"},
+    "nordvpn": {"nordvpn"},
+}
+
+# Same idea for game launchers: their window title often carries just the
+# launcher's own name, which is not a game.
+_GAME_DISPLAY_NAMES = {
+    "steam": {"steam"},
+    "heroic": {"heroic games launcher", "heroic"},
+    "epic_games_launcher": {"epic games launcher", "epic"},
+    "riot_client": {"riot client"},
+    "battledotnet": {"battle.net", "battle"},
+    "gog_galaxy": {"gog galaxy", "gog"},
+    "ea_app": {"ea app", "ea"},
+    "roblox": {"roblox"},
+    "minecraft": {"minecraft launcher"},
+    "moonlight": {"moonlight"},
 }
 
 
@@ -334,7 +374,10 @@ def _active_window_kwin():
 
     out = result.get("app_class"), result.get("caption")
     if not out[0]:
-        return None
+        # no focused window at all (or the report timed out) — KWin is
+        # authoritative on KDE, so signal "nothing is focused" rather than
+        # letting callers fall back to the stale AT-SPI tree
+        return {"no_active": True}
     if out[0] == "SCRIPT-ERROR":
         return None
     return {"app_class": out[0], "caption": out[1]}
@@ -600,7 +643,7 @@ def _firefox_focus(window_title, browser_key="firefox"):
             }
             if fallback is None or cand["lastAccessed"] > fallback["lastAccessed"]:
                 fallback = cand
-            if needle and title and (title == needle or needle in title or title in needle):
+            if _title_matches(needle, title):
                 return cand
     return fallback
 
@@ -768,6 +811,22 @@ def _clean_chromium_title(title):
     return re.sub(r"^\(\d+\)\s*", "", (title or "").strip())
 
 
+def _title_matches(needle, title):
+    """Needle-vs-title match that tolerates prefixes/suffixes but refuses
+    trivial hits (e.g. one-word title 'X' matching '(3) Home / X')."""
+    if not needle or not title:
+        return False
+    t = _clean_chromium_title(title).lower()
+    n = _clean_chromium_title(needle).lower()
+    if t == n:
+        return True
+    if len(t) >= 15 and t in n:
+        return True
+    if len(n) >= 15 and n in t:
+        return True
+    return False
+
+
 def _chromium_history_url(app_key, window_title):
     """Best-guess URL + title of the page in the focused Chromium window."""
     rows = _chromium_history_rows(app_key)
@@ -775,10 +834,8 @@ def _chromium_history_url(app_key, window_title):
         return None
     needle = _tab_title_from_window(window_title)
     if needle:
-        n = _clean_chromium_title(needle).lower()
         for url, title, _t in rows:
-            t = _clean_chromium_title(title).lower()
-            if t and (t == n or t in n or n in t):
+            if _title_matches(needle, title):
                 return url, title
     url, title, _t = rows[0]
     return url, title
@@ -787,18 +844,16 @@ def _chromium_history_url(app_key, window_title):
 def _chromium_recent_domains(app_key, needle, limit=8):
     """Domains from the most recent browsing (current tab first)."""
     rows = _chromium_history_rows(app_key)
-    out, seen_self = {}, False
-    if needle:
-        n = _clean_chromium_title(needle).lower()
+    out, self_domain = {}, None
     for url, title, t in rows:
         domain = _domain_from_url(url)
         if not domain or not url.startswith("http"):
             continue
-        if not seen_self and needle:
-            t_clean = _clean_chromium_title(title).lower()
-            if t_clean and (t_clean == n or t_clean in n or n in t_clean):
-                seen_self = True   # skip the focused tab's own domain
-                continue
+        if needle and self_domain is None and _title_matches(needle, title):
+            self_domain = domain   # skip the focused tab's domain entirely
+            continue
+        if self_domain and domain == self_domain:
+            continue
         out.setdefault(domain, t)
     return [d for d in sorted(out, key=out.get, reverse=True)][:limit]
 
@@ -943,13 +998,25 @@ def _collect_generic_metadata(cls, app_key, window_title):
         meta[field] = None
 
     if cls == "editor":
-        # "file.py - project - Visual Studio Code" / "file - Vim"
+        # "file.py - project - Visual Studio Code" / "file.py — Kate" /
+        # "file.py - Vim": first part is the file; workspace (rarely) in
+        # parts[1] only when it is not the app's own identify.
+        identity = {
+            "visual studio code", "kate", "vim", "neovim", "emacs",
+            "sublime text", "zed", "code", "cursor", "windsurf",
+        }
         if parts:
             meta["file_path"] = parts[0]
-            if len(parts) >= 2:
-                meta["workspace_name"] = parts[1] if "visual studio code" not in parts[1].lower() else parts[0]
-            ext = parts[0].split(".")[-1]
-            if "." in parts[0] and 1 <= len(ext) <= 5:
+            base = os.path.basename(parts[0])
+            if "document_name" in meta:
+                meta["document_name"] = base or None
+            for p in parts[1:]:
+                if p.lower() not in identity:
+                    if "workspace_name" in meta:
+                        meta["workspace_name"] = p
+                    break
+            ext = base.rsplit(".", 1)[-1]
+            if "language" in meta and "." in base and 1 <= len(ext) <= 5:
                 meta["language"] = ext
     elif cls == "video" or app_key in ("vlc", "mpv"):
         # "video_title - VLC media player" / "<title> - mpv"
@@ -990,13 +1057,24 @@ def _collect_generic_metadata(cls, app_key, window_title):
             meta["device_name"] = thing
         elif app_key == "partitionmanager":
             meta["disk_name"] = thing
+        elif app_key in ("kolourpaint", "gwenview"):
+            meta["image_name"] = thing
+        elif app_key == "konsole":
+            meta["tab_name"] = thing
+        elif app_key == "github-desktop":
+            meta["repo_name"] = thing
+        elif app_key == "nordvpn":
+            meta["panel_name"] = thing
         else:
             meta["tool_name"] = thing
     elif cls == "game":
         # launchers show the current page in the title; exact page name only
         # when it is not just the launcher's own name.
-        if parts and parts[0].lower() not in (app_key,):
-            meta["game_name"] = parts[0]
+        display = _GAME_DISPLAY_NAMES.get(app_key, {app_key})
+        for p in parts:
+            if p.lower() not in display:
+                meta["game_name"] = p
+                break
     return meta
 
 
@@ -1022,7 +1100,12 @@ _WEBAPP_TITLE_HINTS = (
     (r"\s+[-\u2013\u2014]\s+YouTube$", "youtube.com"),
     (r"\s+\|\s+Netflix$", "netflix.com"),
     (r"\s+\|\s+Disney\+$", "disneyplus.com"),
+    (r"\s+\|\s+Spotify", "spotify.com"),
     (r"\s+[-\u2013\u2014]\s+Twitch$", "twitch.tv"),
+    (r"\s+[-\u2013\u2014]\s+Reddit$", "reddit.com"),
+    (r"^Reddit\s+[-\u2013\u2014]\s+", "reddit.com"),
+    (r"\s+[-\u2013\u2014]\s+Google Docs$", "docs.google.com"),
+    (r"[\s|]+\s*Notion.?$", "notion.so"),
     (r"\s+[-\u2013\u2014]\s+Overleaf, Online LaTeX Editor", "overleaf.com"),
 )
 
@@ -1099,18 +1182,59 @@ def _collect_webapp_metadata(webapp_key, site_url, tab_title, window_title):
         if m:
             meta["show_title"] = m.group(1).strip()
     elif webapp_key == "twitch.tv":
-        m = re.search(r"^(.*)\s+-\s+Twitch$", tab_title or window_title or "")
+        m = re.search(r"^(.*)\s+[-\u2013\u2014]\s+Twitch$", tab_title or window_title or "")
+        url_streamer = None
+        if site_url:
+            path = urlparse(site_url).path.strip("/")
+            first = path.split("/")[0] if path else ""
+            if first and first.lower() not in (
+                "directory", "videos", "downloads", "settings", "jobs", "store", "turbo",
+            ):
+                url_streamer = first
+        if url_streamer:
+            meta["streamer_name"] = url_streamer
         if m:
-            meta["stream_title"] = m.group(1).strip()
+            # "streamer - stream title - Twitch" or just "streamer - Twitch"
+            segs = [s.strip() for s in m.group(1).split(" - ") if s.strip()]
+            if len(segs) >= 2:
+                if not url_streamer:
+                    meta["streamer_name"] = segs[0]
+                meta["stream_title"] = " - ".join(segs[1:])
+            elif len(segs) == 1 and not url_streamer:
+                meta["stream_title"] = segs[0]
+    elif webapp_key == "spotify.com":
+        combined = tab_title or window_title or ""
+        m = re.search(r"^(.*)\s+\|\s+Spotify(.*)$", combined)
+        if m:
+            name = m.group(1).strip()
+            if m.group(2).lower().startswith(" playlist"):
+                meta["playlist_name"] = name
+            else:
+                meta["track_title"] = name
     elif webapp_key == "reddit.com":
         meta["site_url"] = site_url
+        combined = tab_title or ""
+        m = re.search(
+            r"^(.*\S)\s+(?:[-\u2013\u2014]|\u2022)\s+(r/[\w-]+)\s*(?:[-\u2013\u2014]\s+Reddit.?)?$",
+            combined,
+        )
+        if m:
+            meta["post_title"] = m.group(1).strip()
+            meta["subreddit"] = m.group(2).strip()
+        else:
+            m2 = re.search(r"^(.*\S)\s+[-\u2013\u2014]\s+Reddit.?$", combined)
+            if m2:
+                meta["post_title"] = m2.group(1).strip()
     elif webapp_key == "docs.google.com":
-        # title is usually the open document's name itself
-        if tab_title:
-            meta["document_name"] = tab_title
+        m = re.search(r"^(.*)\s+[-\u2013\u2014]\s+Google Docs$", tab_title or window_title or "")
+        name = m.group(1).strip() if m else (tab_title or "").strip()
+        if name:
+            meta["document_name"] = name
     elif webapp_key == "notion.so":
-        if tab_title:
-            meta["page_name"] = tab_title
+        m = re.search(r"^(.*\S)\s+[-\u2013\u2014|]\s+Notion.?$", tab_title or window_title or "")
+        name = m.group(1).strip() if m else (tab_title or "").strip()
+        if name:
+            meta["page_name"] = name
     elif webapp_key == "overleaf.com":
         m = re.search(r"^(.*)\s+-\s+Overleaf", tab_title or window_title or "")
         if m:
@@ -1121,6 +1245,25 @@ def _collect_webapp_metadata(webapp_key, site_url, tab_title, window_title):
 def get_desktop_state(user_goal=None):
     """Collect what the user is doing right now; returns the state dict."""
     kwin = _active_window_kwin()
+    if kwin is not None and kwin.get("no_active"):
+        # On KDE, KWin is the only source of truth: if it says nothing is
+        # focused (desktop peek, no focus, or between windows) we report
+        # exactly that instead of the stale accessibility tree.
+        universal = {
+            "app_focused_name": "none",
+            "app_class": "none",
+            "window_title": None,
+            "detection_backend": "kwin",
+            "focus_lost": True,
+            "time_window_focused": None,
+            "last_active_seconds": None,
+            "afk_seconds": None,
+            "detected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        if user_goal:
+            universal["user_goal"] = user_goal
+        return {"universal": universal}
+
     if kwin is not None:
         state_source = "kwin"
         raw_app_name = kwin["app_class"]
@@ -1140,6 +1283,7 @@ def get_desktop_state(user_goal=None):
         "app_class": cls or "unknown",
         "window_title": window_title,
         "detection_backend": state_source,
+        "focus_lost": False,
         # single-shot run: no tracker running yet, so these are None until
         # the polling/timing collector exists.
         "time_window_focused": None,
@@ -1160,15 +1304,15 @@ def get_desktop_state(user_goal=None):
 
         if cls == "browser":
             md = state["app_metadata"]
-            webapp_key = _match_webapp(md.get("site_domain"))
-            matched_via = "url"
-            if not webapp_key or webapp_key == "_default":
-                # URL unreadable (e.g. AppArmor-fenced snap Firefox) — many
-                # sites still identify themselves in the tab title.
-                hint = _match_webapp_from_title(md.get("tab_title"))
-                if hint:
-                    webapp_key = hint
-                    matched_via = "tab_title"
+            # The tab title is the freshest signal (it IS the visible tab),
+            # so a title hint outranks the possibly-stale history DB match.
+            hinted = _match_webapp_from_title(md.get("tab_title"))
+            webapp_key = hinted
+            if webapp_key:
+                matched_via = "tab_title"
+            else:
+                webapp_key = _match_webapp(md.get("site_domain"))
+                matched_via = "url"
             if webapp_key and webapp_key != "_default":
                 state["webapp"] = {
                     "site_domain": md.get("site_domain"),

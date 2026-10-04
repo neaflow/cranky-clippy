@@ -10,7 +10,7 @@ API_KEY = "sk-or-v1-b4bc639d053e2cb831174ac3537a0128a845d5dd7964a5e21b40b0f92e1d
 
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 MODEL = "typesafe/jev-1.13"
-user_goal = input("What is your goal: ")
+user_goal = ""
 yes_threshold = 50.0
 
 
