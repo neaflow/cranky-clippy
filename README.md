@@ -24,10 +24,29 @@ Note: you can hide the debug menu with the **collapse** button. You can kill Cra
 
 ### 1. Install dependencies
 
+#### Debian/Ubuntu/Mint (apt)
+
 ```sh
 sudo apt update
 sudo apt install python3 xwayland python3-venv python3-tk python3-gi python3-dbus \
   gir1.2-atspi-2.0 at-spi2-core
+```
+
+#### Arch/Manjaro/EndeavourOS/Cachy (pacman)
+
+```sh
+sudo pacman -Syu
+sudo pacman -S --needed python xorg-server-xwayland tk python-gobject at-spi2-core
+```
+
+#### Fedora/openSUSE (rpm)
+
+```sh
+# Fedora
+sudo dnf install python3 xwayland python3-tkinter python3-gobject at-spi2-core at-spi2-atk
+
+# openSUSE
+sudo zypper install python3 xwayland python3-tk python3-gobject at-spi2-core
 ```
 
 ### 2. Create a virtual environment and install PySide6
