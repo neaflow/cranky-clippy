@@ -9,12 +9,12 @@ TO DO:
 Front-end:
     v/-speech text
     v/-min windows
-    -text-to-speech - ELEVENS add-on
+    -text-to-speech - ELEVENS add-on----------
     v/-closing windows
-    -increase shaking based on mood
+    v/-increase shaking based on mood
     -intro animation
-    -opening mini windows
-    -animations
+    -opening mini windows---------------------
+    v/-animations
     -draggable? 
     -workable on windows
     -workable on mac

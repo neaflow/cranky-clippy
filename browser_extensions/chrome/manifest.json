@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "cranky clippy connect",
+  "version": "1.0.0",
+  "description": "Lets Jev remember and reactivate the last on-task browser tab.",
+  "icons": {
+    "48": "cracli.png",
+    "128": "cracli.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArh4Tz43vWTgMXSzDZEmD5rNKyrgZndi7j3+dnQz8r5UdRGIvUs/VT5a/eGAotlIE7OdhE6F0itXy37h0fvtaojp16bRZ7WpyOqCjm+F3FX3J1C7YjQNn7ecpS4AA1zLbRzDVe0mEEn6Owjsmobr7pld9+ngzkAA1DlBlsE6VfrbghWY77+9a5TMZx0bHPaWLLbMgjmaUvSNEThepq+c61G6Cj5lbDCh26V1cvDreRIKsjP3Co33GQpJX0mcCwS7mI1Y4xDA3PFfylMkF+qNTaOD0mZLb+3pcoDokg/hoZFOLxLFWySBo6TeJSV8AVMExvzlgj0FyZKN5TeKLojdlEQIDAQAB",
+  "permissions": ["alarms", "nativeMessaging", "storage", "tabs"],
+  "background": {"service_worker": "background.js"}
+}

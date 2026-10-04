@@ -846,6 +846,120 @@ def _active_window_kwin():
     }
 
 
+def _kwin_activate_and_minimize(target_window_id, expected_active_window_id=None,
+                                minimize_if_target_missing=False,
+                                minimize_current=True,
+                                return_detail=False,
+                                target_desktop_file_id=None,
+                                target_caption=None):
+    """Restore/activate a KWin window and optionally minimize the distraction.
+
+    The active window is minimized only if it is still the exact window Jev
+    observed, and only when it differs from the saved task window. This avoids
+    minimizing a window the user switched to after Jev's last poll.
+    """
+    if not _DBUS_OK or "kde" not in _desktop_kind():
+        return (False, "KWin control unavailable") if return_detail else False
+
+    result = {"ok": False}
+    loop = GLib.MainLoop()
+    control_path = "/com/crankyclippy/windowcontrol/%s" % uuid.uuid4().hex
+
+    class _WindowControl(dbus.service.Object):
+        def __init__(self, conn):
+            dbus.service.Object.__init__(self, conn, control_path)
+
+        @dbus.service.method("com.crankyclippy.windowcontrol", in_signature="bs")
+        def Report(self, ok, detail):
+            result["ok"] = bool(ok)
+            result["detail"] = str(detail)
+            loop.quit()
+
+    try:
+        session_bus = dbus.SessionBus()
+        sender = session_bus.get_unique_name()
+        control = _WindowControl(session_bus)
+    except Exception:
+        return (False, "could not create KWin DBus control") if return_detail else False
+
+    target_id = str(target_window_id or "")
+    expected_id = str(expected_active_window_id or "")
+    desktop_file_id = str(target_desktop_file_id or "")
+    caption = str(target_caption or "")
+    js = (
+        "try {\n"
+        "  var targetId = %s;\n"
+        "  var expectedId = %s;\n"
+        "  var desktopId = %s;\n"
+        "  var targetCaption = %s;\n"
+        "  var target = null;\n"
+        "  var windows = workspace.windowList();\n"
+        "  for (var i = 0; i < windows.length; i++) {\n"
+        "    if (String(windows[i].internalId) === targetId) { target = windows[i]; break; }\n"
+        "  }\n"
+        "  if (!target && desktopId) {\n"
+        "    var candidates = windows.filter(function(w) { return String(w.desktopFileName || '') === desktopId; });\n"
+        "    target = candidates.find(function(w) { return targetCaption && String(w.caption || '') === targetCaption; }) || (!targetCaption ? candidates[0] : null);\n"
+        "  }\n"
+        "  if (!target && targetCaption) {\n"
+        "    target = windows.find(function(w) { return String(w.caption || '') === targetCaption; }) || null;\n"
+        "  }\n"
+        "  var active = workspace.activeWindow;\n"
+        "  var activeId = active ? String(active.internalId) : \"\";\n"
+        "  if (expectedId && activeId !== expectedId) {\n"
+        '    callDBus(%s, %s, "com.crankyclippy.windowcontrol", "Report", false, "active window changed");\n'
+        "  } else {\n"
+        "    if (%s && expectedId && active && activeId === expectedId && activeId !== targetId && active.minimizable && (target || %s)) {\n"
+        "      active.minimized = true;\n"
+        "    }\n"
+        "    if (target) { target.minimized = false; workspace.activeWindow = target; }\n"
+        '    callDBus(%s, %s, "com.crankyclippy.windowcontrol", "Report", !!target, target ? "activated" : "target window not found");\n'
+        "  }\n"
+        "} catch (e) {\n"
+        '  callDBus(%s, %s, "com.crankyclippy.windowcontrol", "Report", false, String(e));\n'
+        "}\n" % (
+        json.dumps(target_id), json.dumps(expected_id),
+        json.dumps(desktop_file_id), json.dumps(caption),
+        json.dumps(sender), json.dumps(control_path),
+            "true" if minimize_current else "false",
+            "true" if minimize_if_target_missing else "false",
+            json.dumps(sender), json.dumps(control_path),
+            json.dumps(sender), json.dumps(control_path),
+        )
+    )
+
+    plugin_name = "cranky-control-%s" % uuid.uuid4().hex[:8]
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(js)
+        js_path = fh.name
+    try:
+        session_bus.call_blocking("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting",
+                                  "loadScript", "ss", (js_path, plugin_name))
+        session_bus.call_blocking("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting",
+                                  "start", "", ())
+        GLib.timeout_add_seconds(3, lambda: (loop.quit(), False)[1])
+        loop.run()
+    except Exception as exc:
+        print("[DesktopState] KWin window control failed: %s" % exc)
+    finally:
+        try:
+            control.remove_from_connection()
+        except Exception:
+            pass
+        try:
+            session_bus.call_blocking("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting",
+                                      "unloadScript", "s", (plugin_name,))
+        except Exception:
+            pass
+        try:
+            os.unlink(js_path)
+        except OSError:
+            pass
+    if return_detail:
+        return result["ok"], result.get("detail", "KWin control timed out")
+    return result["ok"]
+
+
 def _active_window_atspi():
     """AT-SPI fallback: return (app_name, window_title) of the ACTIVE frame,
     or (None, None). Note: on KDE this can be stale — the KWin backend wins."""
@@ -1590,6 +1704,8 @@ def get_desktop_state(user_goal=None):
             "app_focused_name": "none",
             "app_class": "none",
             "window_title": None,
+            "window_id": None,
+            "desktop_file_id": None,
             "detection_backend": "kwin",
             "focus_lost": True,
             "time_since_window_focused": _time_since_window_focused(None),
@@ -1634,6 +1750,8 @@ def get_desktop_state(user_goal=None):
         "app_focused_name": app_key or (raw_app_name or "").strip().lower() or "unknown",
         "app_class": cls or "unknown",
         "window_title": window_title,
+        "window_id": raw_window_id,
+        "desktop_file_id": raw_desktop_file_id,
         "detection_backend": state_source,
         "focus_lost": False,
         "time_since_window_focused": time_since_window_focused,

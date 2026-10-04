@@ -14,7 +14,11 @@ seconds whether what you're doing right now is a distraction from it.
 """
 
 import json
+import os
+import queue
+import shutil
 import sys
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -22,6 +26,7 @@ import tkinter.font as tkfont
 
 import get_desktop_state
 import jev_decides
+from browser_extensions.bridge_server import BrowserExtensionBridge
 
 POLL_SECONDS = 4
 OVERLAY_TITLE = "cranky clippy"
@@ -36,6 +41,17 @@ MUT = "#a89fc0"
 
 BRIEF_CHECKIN_APP_CLASSES = frozenset({"chat", "collaboration", "desktop", "email"})
 BRIEF_CHECKIN_MAX_SECONDS = 45.0
+HAPPY_AFTER_FOCUSED_SECONDS = 60.0
+OFF_TASK_ESCALATION_STAGES = (
+    (0.0, "sad"),
+    (10.0, "ticked-off"),
+    (25.0, "angry"),
+    (45.0, "very-angry"),
+)
+BRIEF_CHECKIN_ESCALATION_STAGES = (
+    (15.0, "angry"),
+    (35.0, "very-angry"),
+)
 
 
 def _is_brief_checkin(universal, webapp=None):
@@ -49,6 +65,28 @@ def _is_brief_checkin(universal, webapp=None):
         and isinstance(elapsed, (int, float))
         and 0 <= elapsed <= BRIEF_CHECKIN_MAX_SECONDS
     )
+
+
+def _focus_target(state):
+    """Return the app/site/tab identity Jev sees for the current focus."""
+    universal = state.get("universal") or {}
+    metadata = state.get("app_metadata") or {}
+    return {
+        "app": str(universal.get("app_focused_name") or "unknown"),
+        "site": str(metadata.get("site_domain") or ""),
+        "url": str(metadata.get("site_url") or "")[:400],
+        "title": str(metadata.get("tab_title") or universal.get("window_title") or "")[:200],
+        "window_id": str(universal.get("window_id") or ""),
+    }
+
+
+def _target_signature(target):
+    app = str(target.get("app", "")).strip().casefold()
+    site = str(target.get("site", "")).strip().casefold()
+    url = str(target.get("url", "")).strip().casefold()
+    identity = url or str(target.get("title", "")).strip().casefold()
+    window_id = str(target.get("window_id", "")).strip().casefold()
+    return app, site, identity, window_id
 
 
 class GoalOverlay:
@@ -67,6 +105,28 @@ class GoalOverlay:
         self._worker = None
         self._stop = False
         self._inflight = False
+        self._pet_process = None
+        self._pet_stdin_lock = threading.Lock()
+        self._browser_bridge = BrowserExtensionBridge()
+        self._browser_bridge.on_message = self._on_browser_bridge_message
+        self._browser_restore_acks = queue.Queue()
+        self._ignore_next_on_task = threading.Event()
+        self._excused_target_signature = None
+        self._excuse_pending = False
+        self._typing_pause_started_at = None
+        self._typing_pause_until = 0.0
+        self._typing_pause_total = 0.0
+        self._last_on_task_target = None
+        self._final_action_attempted = False
+        self._activity_phase = None
+        self._activity_target = None
+        self._on_task_target_signature = None
+        self._happy_focus_target_signature = None
+        self._distraction_started_at = None
+        self._escalation_started_at = None
+        self._escalation_stage = -1
+        self._brief_checkin_expired = False
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.goal_entry = tk.Entry(
             root, width=26, bg=BG, fg=MUT, insertbackground=FG,
@@ -140,6 +200,7 @@ class GoalOverlay:
 
     def _apply_goal(self, goal):
         self.goal = goal
+        self._start_pet_process()
         self.goal_label.config(text=f'goal: "{goal}"')
         if not self.goal_label.winfo_ismapped():
             self.goal_label.pack(padx=10, pady=(8, 0))
@@ -152,6 +213,506 @@ class GoalOverlay:
             self._stop = False
             self._worker = threading.Thread(target=self._poll_loop, daemon=True)
             self._worker.start()
+
+    def _start_pet_process(self):
+        """Launch Clippy as a quiet child process controlled by Jev events."""
+        if self._pet_process is not None and self._pet_process.poll() is None:
+            return
+        pet_script = os.path.join(os.path.dirname(__file__), "clippy_overlay.py")
+        try:
+            self._pet_process = subprocess.Popen(
+                [sys.executable, "-u", pet_script],
+                cwd=os.path.dirname(__file__),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            threading.Thread(
+                target=self._read_pet_events,
+                args=(self._pet_process,),
+                name="clippy-event-reader",
+                daemon=True,
+            ).start()
+        except OSError as exc:
+            self._pet_process = None
+            print("[JevOverlay] Could not start Clippy: %s" % exc, file=sys.stderr)
+
+    def _read_pet_events(self, process):
+        prefix = "__CLIPPY_PARENT_EVENT__"
+        for line in process.stdout or ():
+            if not line.startswith(prefix):
+                continue
+            try:
+                message = json.loads(line[len(prefix):])
+                self.root.after(0, self._handle_pet_parent_event, message)
+            except (ValueError, tk.TclError):
+                return
+
+    def _finish_typing_pause(self, now):
+        if (
+            self._typing_pause_started_at is not None
+            and not self._excuse_pending
+            and now >= self._typing_pause_until
+        ):
+            self._typing_pause_total += max(
+                0.0, self._typing_pause_until - self._typing_pause_started_at
+            )
+            self._typing_pause_started_at = None
+            self._typing_pause_until = 0.0
+
+    def _record_excuse_typing(self):
+        now = time.monotonic()
+        self._finish_typing_pause(now)
+        if self._typing_pause_started_at is None:
+            self._typing_pause_started_at = now
+        self._typing_pause_until = now + 3.0
+
+    def _handle_pet_parent_event(self, event):
+        event_type = event.get("type")
+        if event_type == "excuse_typing":
+            self._record_excuse_typing()
+        elif event_type == "excuse_submitted":
+            self._record_excuse_typing()
+            self._excuse_pending = True
+        elif event_type == "excuse_accepted":
+            target = event.get("target") or {}
+            self._excused_target_signature = _target_signature(target)
+            self._activity_phase = "excused"
+            self._activity_target = target
+            self._excuse_pending = False
+            self._escalation_started_at = None
+            self._escalation_stage = -1
+            self._typing_pause_started_at = None
+            self._typing_pause_until = 0.0
+            self._typing_pause_total = 0.0
+            print("[JevOverlay] Clippy accepted the user's excuse for this app/tab.")
+        elif event_type == "excuse_rejected":
+            self._excuse_pending = False
+            if self._activity_phase == "off_task":
+                # Rejection advances the first confrontation to ticked-off.
+                self._escalation_stage = max(self._escalation_stage, 1)
+                now = time.monotonic()
+                self._finish_typing_pause(now)
+                remaining_pause = (
+                    max(0.0, self._typing_pause_until - now)
+                    if self._typing_pause_started_at is not None else 0.0
+                )
+                self._typing_pause_started_at = now if remaining_pause else None
+                self._typing_pause_until = now + remaining_pause if remaining_pause else 0.0
+                self._typing_pause_total = 0.0
+                self._escalation_started_at = now - 10.0
+            print("[JevOverlay] Clippy rejected the excuse; normal distraction escalation resumes.")
+
+    def _off_task_escalation_elapsed(self, now):
+        """Elapsed escalation time excluding typing and the post-typing grace."""
+        self._finish_typing_pause(now)
+        if self._escalation_started_at is None:
+            return 0.0
+        if self._typing_pause_started_at is not None:
+            elapsed_until_pause = self._typing_pause_started_at - self._escalation_started_at
+            return max(0.0, elapsed_until_pause - self._typing_pause_total)
+        return max(
+            0.0,
+            now - self._escalation_started_at - self._typing_pause_total,
+        )
+
+    def _send_pet_event(self, event, state, result, stage_mood=None, elapsed=None,
+                        previous_target=None, final_return_to_task=False):
+        process = self._pet_process
+        if process is None or process.poll() is not None or process.stdin is None:
+            return
+        universal = state.get("universal", {})
+        metadata = state.get("app_metadata") or {}
+        relevant_fields = (
+            "game_name", "game_running", "time_in_game", "media_title",
+            "playback_state", "document_name", "file_path", "workspace_name",
+            "channel_or_chat_name", "server_or_dm_name", "channel_name",
+            "space_or_chat_name", "stream_name", "mail_folder", "mail_subject",
+        )
+        activity_details = {
+            key: value[:200] if isinstance(value, str) else value
+            for key in relevant_fields
+            if (value := metadata.get(key)) is not None
+        }
+        context = {
+            "goal": self.goal,
+            "focused_app": universal.get("app_focused_name"),
+            "app_class": universal.get("app_class"),
+            "window_title": (universal.get("window_title") or "")[:200],
+            "target": _focus_target(state),
+            "app_description": (metadata.get("app_description") or "")[:300],
+            "activity_details": activity_details,
+            "elapsed_seconds": round(max(0.0, elapsed), 1) if elapsed is not None else 0,
+        }
+        if stage_mood:
+            context["stage_mood"] = stage_mood
+        if previous_target:
+            context["previous_target"] = previous_target
+        if final_return_to_task:
+            context["final_return_to_task"] = True
+        if event.startswith("brief_checkin"):
+            context["brief_checkin_seconds"] = BRIEF_CHECKIN_MAX_SECONDS
+        if result:
+            context["jev_verdict"] = result.get("answer")
+            context["on_track_percent"] = result.get("on_track_percent")
+            context["not_on_track_percent"] = result.get("not_on_track_percent")
+        try:
+            with self._pet_stdin_lock:
+                process.stdin.write(json.dumps({"event": event, "context": context}) + "\n")
+                process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            print("[JevOverlay] Could not send event to Clippy: %s" % exc, file=sys.stderr)
+
+    def _send_pet_mood(self, mood, persistent=False):
+        process = self._pet_process
+        if process is None or process.poll() is not None or process.stdin is None:
+            return
+        try:
+            with self._pet_stdin_lock:
+                process.stdin.write(json.dumps({
+                    "action": "set_mood", "mood": mood, "persistent": persistent,
+                }) + "\n")
+                process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            print("[JevOverlay] Could not change Clippy's animation: %s" % exc, file=sys.stderr)
+
+    def _remember_on_task_target(self, state):
+        universal = state.get("universal", {})
+        metadata = state.get("app_metadata") or {}
+        app = universal.get("app_focused_name")
+        is_browser = universal.get("app_class") == "browser" and app in {"chrome", "firefox"}
+        target = {
+            "app": app,
+            "app_class": universal.get("app_class"),
+            "browser": app if is_browser else None,
+            "window_id": universal.get("window_id"),
+            "desktop_file_id": universal.get("desktop_file_id"),
+            "window_title": universal.get("window_title") or "",
+            "site_url": metadata.get("site_url"),
+            "site_domain": metadata.get("site_domain"),
+            "tab_title": metadata.get("tab_title"),
+            "launch_uri": metadata.get("file_path") or metadata.get("document_path"),
+            "goal": self.goal,
+        }
+        self._last_on_task_target = target
+        if is_browser:
+            self._browser_bridge.send(app, {"action": "remember", "target": target})
+
+    def _return_to_last_on_task_target(self, current_state):
+        if self._final_action_attempted:
+            return
+        self._final_action_attempted = True
+        target = self._last_on_task_target
+        if not target:
+            print("[JevOverlay] Final anger reached without a remembered on-task target.")
+            return
+
+        current_window_id = (current_state.get("universal") or {}).get("window_id")
+
+        def restore():
+            browser = target.get("browser")
+            window_restored, control_detail = get_desktop_state._kwin_activate_and_minimize(
+                target.get("window_id"),
+                expected_active_window_id=current_window_id,
+                minimize_if_target_missing=True,
+                return_detail=True,
+                target_desktop_file_id=target.get("desktop_file_id"),
+                target_caption=target.get("window_title"),
+            )
+            if browser:
+                if control_detail == "active window changed":
+                    print("[JevOverlay] Skipping final browser return; focus changed since Jev sampled it.")
+                    return
+                while not self._browser_restore_acks.empty():
+                    try:
+                        self._browser_restore_acks.get_nowait()
+                    except queue.Empty:
+                        break
+                extension_notified = self._browser_bridge.send(
+                    browser, {"action": "restore", "target": target}
+                )
+                restored = False
+                if extension_notified:
+                    deadline = time.monotonic() + 6
+                    while time.monotonic() < deadline:
+                        try:
+                            reply_browser, reply = self._browser_restore_acks.get(
+                                timeout=max(0.05, deadline - time.monotonic())
+                            )
+                        except queue.Empty:
+                            break
+                        if reply_browser != browser:
+                            continue
+                        if reply.get("type") == "restored":
+                            restored = True
+                            break
+                        if reply.get("type") == "error" and reply.get("action") == "restore":
+                            break
+                if not restored and target.get("site_url"):
+                    executable = shutil.which(
+                        "firefox" if browser == "firefox" else "google-chrome"
+                    )
+                    if executable:
+                        try:
+                            subprocess.Popen(
+                                [executable, "--new-tab", target["site_url"]],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                            restored = True  # startup URL opens the saved page
+                        except OSError as exc:
+                            print("[JevOverlay] Could not reopen %s: %s" % (browser, exc))
+                print(
+                    "[JevOverlay] Final anger: restored browser task %s (window=%s, extension=%s)."
+                    % (target.get("site_url") or target.get("tab_title"),
+                       window_restored, extension_notified)
+                )
+                if restored:
+                    self._notify_pet_auto_returned()
+            elif control_detail == "target window not found":
+                if not self._launch_task_application(target):
+                    print("[JevOverlay] Could not reopen the remembered task window.")
+                    return
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    time.sleep(0.35)
+                    window_restored, control_detail = get_desktop_state._kwin_activate_and_minimize(
+                        None,
+                        expected_active_window_id=None,
+                        minimize_current=False,
+                        return_detail=True,
+                        target_desktop_file_id=target.get("desktop_file_id"),
+                        target_caption=target.get("window_title"),
+                    )
+                    if window_restored:
+                        break
+                print(
+                    "[JevOverlay] Reopened remembered task application %r (success=%s)."
+                    % (target.get("desktop_file_id") or target.get("app"), window_restored)
+                )
+                if window_restored:
+                    self._notify_pet_auto_returned()
+            else:
+                print(
+                    "[JevOverlay] Final anger: restored on-task window %r (success=%s)."
+                    % (target.get("window_title"), window_restored)
+                )
+                if window_restored:
+                    self._notify_pet_auto_returned()
+
+        threading.Thread(target=restore, name="clippy-return-to-task", daemon=True).start()
+
+    def _on_browser_bridge_message(self, browser, message):
+        if message.get("type") in {"restored", "error"}:
+            self._browser_restore_acks.put((browser, message))
+
+    def _notify_pet_auto_returned(self):
+        """Suppress the next Jev YES reaction after Clippy restores the target."""
+        self._ignore_next_on_task.set()
+        process = self._pet_process
+        if process is None or process.poll() is not None or process.stdin is None:
+            return
+        try:
+            with self._pet_stdin_lock:
+                process.stdin.write(json.dumps({"action": "auto_returned"}) + "\n")
+                process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            print("[JevOverlay] Could not notify Clippy of automatic return: %s" % exc)
+
+    @staticmethod
+    def _launch_task_application(target):
+        """Reopen a closed on-task app from its KWin desktop-file identity."""
+        desktop_id = (target.get("desktop_file_id") or "").strip()
+        gtk_launch = shutil.which("gtk-launch")
+        if gtk_launch and desktop_id:
+            application_id = desktop_id.removesuffix(".desktop")
+            launch_args = [gtk_launch, application_id]
+            launch_uri = target.get("launch_uri")
+            if isinstance(launch_uri, str) and os.path.isabs(launch_uri) and os.path.exists(launch_uri):
+                launch_args.append(launch_uri)
+            try:
+                subprocess.Popen(
+                    launch_args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except OSError as exc:
+                print("[JevOverlay] Could not launch task desktop entry: %s" % exc)
+
+        app = (target.get("app") or "").strip()
+        executable_names = {
+            "visual_studio_code": "code", "google_chrome": "google-chrome",
+            "msedge": "microsoft-edge", "libreoffice_writer": "libreoffice",
+        }
+        executable = shutil.which(executable_names.get(app, app))
+        if not executable:
+            return False
+        try:
+            subprocess.Popen([executable], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except OSError as exc:
+            print("[JevOverlay] Could not launch task app %r: %s" % (app, exc))
+            return False
+
+    def _update_pet_state(self, state, result, brief_check_in):
+        """Send pet commands only for phase, target, or escalation changes."""
+        now = time.monotonic()
+        universal = state.get("universal", {})
+        verdict = result.get("answer", "?")
+        phase = (
+            "on_task" if verdict.startswith("YES")
+            else "brief_checkin" if brief_check_in
+            else "off_task"
+        )
+        target = _focus_target(state)
+        previous_phase = self._activity_phase
+        target_changed = (
+            self._activity_target is not None
+            and _target_signature(target) != _target_signature(self._activity_target)
+        )
+
+        target_signature = _target_signature(target)
+        if phase != "on_task" and self._excused_target_signature is not None:
+            if target_signature == self._excused_target_signature:
+                self._activity_phase = "excused"
+                self._activity_target = target
+                return
+            # An excuse only applies to the exact app/tab/window it justified.
+            self._excused_target_signature = None
+        if self._excuse_pending and phase != "on_task":
+            # Don't escalate or prompt again while Gemini is judging the typed
+            # explanation; the escalation clock is paused during this check.
+            return
+
+        if phase == "on_task":
+            self._final_action_attempted = False
+            self._excused_target_signature = None
+            self._excuse_pending = False
+            auto_returned = self._ignore_next_on_task.is_set()
+            if auto_returned:
+                self._ignore_next_on_task.clear()
+            elif previous_phase in {"brief_checkin", "off_task"}:
+                elapsed = (
+                    now - self._distraction_started_at
+                    if self._distraction_started_at is not None else 0
+                )
+                self._send_pet_event("on_task", state, result, elapsed=elapsed)
+            if self._on_task_target_signature != target_signature:
+                if self._on_task_target_signature is not None:
+                    self._send_pet_mood("idle")
+                self._on_task_target_signature = target_signature
+                self._happy_focus_target_signature = None
+            focused_seconds = universal.get("time_since_window_focused")
+            if isinstance(focused_seconds, (int, float)) and focused_seconds > HAPPY_AFTER_FOCUSED_SECONDS:
+                if self._happy_focus_target_signature != target_signature:
+                    self._send_pet_mood("happy", persistent=True)
+                    self._happy_focus_target_signature = target_signature
+            self._activity_phase = phase
+            self._activity_target = target
+            self._distraction_started_at = None
+            self._escalation_started_at = None
+            self._escalation_stage = -1
+            self._brief_checkin_expired = False
+            self._typing_pause_started_at = None
+            self._typing_pause_until = 0.0
+            self._typing_pause_total = 0.0
+            return
+
+        if phase == "brief_checkin":
+            self._on_task_target_signature = None
+            self._happy_focus_target_signature = None
+            self._happy_focus_target_signature = None
+            if self._distraction_started_at is None:
+                self._distraction_started_at = now
+            if previous_phase != "brief_checkin":
+                self._send_pet_event(
+                    "brief_checkin_started", state, result, stage_mood="idle",
+                    elapsed=now - self._distraction_started_at,
+                )
+            elif target_changed:
+                self._send_pet_event(
+                    "brief_checkin_changed", state, result, stage_mood="idle",
+                    elapsed=now - self._distraction_started_at,
+                )
+            self._activity_phase = phase
+            self._activity_target = target
+            return
+
+        # Off-task: a check-in that has passed its allowance gets a distinct
+        # ticked-off reaction; changing from check-in to another app starts a
+        # fresh off-task escalation instead.
+        if previous_phase == "brief_checkin" and not target_changed:
+            self._escalation_started_at = now
+            self._escalation_stage = 1  # ticked-off
+            self._brief_checkin_expired = True
+            self._send_pet_event(
+                "brief_checkin_expired", state, result, stage_mood="ticked-off",
+                elapsed=BRIEF_CHECKIN_MAX_SECONDS,
+            )
+        elif previous_phase != "off_task":
+            self._distraction_started_at = now
+            self._escalation_started_at = now
+            self._escalation_stage = 0  # sad
+            self._brief_checkin_expired = False
+            self._final_action_attempted = False
+            self._excuse_pending = False
+            self._typing_pause_started_at = None
+            self._typing_pause_until = 0.0
+            self._typing_pause_total = 0.0
+            self._send_pet_event(
+                "distraction_started", state, result, stage_mood="sad", elapsed=0
+            )
+        else:
+            escalation_elapsed = self._off_task_escalation_elapsed(now)
+            if self._brief_checkin_expired:
+                desired_stage = max(
+                    index + 2
+                    for index, (seconds, _mood) in enumerate(BRIEF_CHECKIN_ESCALATION_STAGES)
+                    if seconds <= escalation_elapsed
+                ) if escalation_elapsed >= BRIEF_CHECKIN_ESCALATION_STAGES[0][0] else 1
+            else:
+                desired_stage = max(
+                    index for index, (seconds, _mood) in enumerate(OFF_TASK_ESCALATION_STAGES)
+                    if seconds <= escalation_elapsed
+                )
+            if target_changed:
+                self._escalation_stage = max(self._escalation_stage, desired_stage)
+                mood = OFF_TASK_ESCALATION_STAGES[self._escalation_stage][1]
+                self._send_pet_event(
+                    "distraction_changed", state, result, stage_mood=mood,
+                    elapsed=escalation_elapsed, previous_target=self._activity_target,
+                    final_return_to_task=(self._escalation_stage == 3),
+                )
+            elif desired_stage > self._escalation_stage:
+                self._escalation_stage = desired_stage
+                mood = OFF_TASK_ESCALATION_STAGES[desired_stage][1]
+                self._send_pet_event(
+                    "escalation", state, result, stage_mood=mood,
+                    elapsed=escalation_elapsed,
+                    final_return_to_task=(desired_stage == 3),
+                )
+
+        self._activity_phase = phase
+        self._activity_target = target
+        if phase != "on_task":
+            self._on_task_target_signature = None
+        self._happy_focus_target_signature = None
+        if phase == "off_task" and self._escalation_stage >= 3:
+            self._return_to_last_on_task_target(state)
+
+    def _on_close(self):
+        self._stop = True
+        self._browser_bridge.close()
+        process = self._pet_process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self.root.destroy()
 
     def _on_change_goal(self):
         if self.goal_entry.winfo_ismapped():
@@ -231,10 +792,13 @@ class GoalOverlay:
             yes = result.get("on_track_percent", 0)
             no = result.get("not_on_track_percent", 0)
             verdict = result.get("answer", "?")
+            if verdict.startswith("YES"):
+                self._remember_on_task_target(state)
             brief_check_in = (
                 not verdict.startswith("YES")
                 and _is_brief_checkin(universal, state.get("webapp"))
             )
+            self._update_pet_state(state, result, brief_check_in)
             self.result_label.config(
                 text=(
                     "✅ ON TRACK" if verdict.startswith("YES")
