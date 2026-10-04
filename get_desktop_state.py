@@ -63,7 +63,6 @@ from app_catalog import (
     APP_DESCRIPTIONS,
     APP_METADATA,
     EMAIL_WEBAPP_PROVIDERS,
-    SHELL_APPS,
     WEBAPP_CATEGORIES,
     WEBAPP_METADATA,
     _CHROMIUM_PROFILE_ROOTS,
@@ -73,6 +72,7 @@ from app_catalog import (
     _GECKO_SESSIONSTORE_BROWSERS,
     _PROFILE_DIR_SKIPS,
     _canonical,
+    _is_shell_app,
     _match_app,
     _match_webapp,
     _match_webapp_from_title,
@@ -978,8 +978,6 @@ def _active_window_atspi():
             app_name = (app.get_name() or "").lower()
         except Exception:
             continue
-        if app_name in (s.strip() for s in SHELL_APPS):
-            continue
         try:
             frame_count = app.get_child_count()
         except Exception:
@@ -1728,6 +1726,29 @@ def get_desktop_state(user_goal=None):
         raw_app_name, window_title = _active_window_atspi()
         raw_window_id = None
         raw_desktop_file_id = None
+
+    # Desktop shell UI (application launchers, panels, overview) is not a
+    # user activity to judge. Pause the decision until a real app is focused.
+    if _is_shell_app(raw_app_name):
+        idle_seconds, idle_source = _time_since_last_active()
+        universal = {
+            "app_focused_name": (raw_app_name or "").strip().lower(),
+            "app_class": "desktop_shell",
+            "window_title": window_title,
+            "window_id": raw_window_id,
+            "desktop_file_id": raw_desktop_file_id,
+            "detection_backend": state_source,
+            "focus_lost": False,
+            "skip_decision": True,
+            "skip_decision_reason": "desktop_shell",
+            "time_since_window_focused": _time_since_window_focused(None),
+            "time_since_last_active": idle_seconds,
+            "activity_time_source": idle_source,
+            "detected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        if user_goal:
+            universal["user_goal"] = user_goal
+        return {"universal": universal}
 
     if raw_app_name:
         window_identity = (

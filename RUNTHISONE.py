@@ -794,11 +794,11 @@ class GoalOverlay:
             )
             state = json.loads(jev_state_json)
             universal = state.get("universal", {})
-            # never judge ourselves, and never judge a focus-less desktop:
-            # if the overlay is what's focused or nothing is focused at
-            # all, pause until the user clicks somewhere real
+            # Never judge ourselves, a focus-less desktop, or transient
+            # desktop-shell UI such as the application launcher.
             paused = (
                 universal.get("focus_lost")
+                or universal.get("skip_decision")
                 or universal.get("window_title") == OVERLAY_TITLE
             )
             self.root.after(0, self._render, state, None)
@@ -823,9 +823,12 @@ class GoalOverlay:
         focused = universal.get("app_focused_name", "?")
 
         if result is None:
-            if universal.get("focus_lost") or universal.get(
-                "window_title"
-            ) == OVERLAY_TITLE:
+            if universal.get("skip_decision_reason") == "desktop_shell":
+                self.status_label.config(
+                    text="desktop launcher open - checking resumes when you open an app"
+                )
+                checked = "decision skipped (desktop shell) %s" % time.strftime("%H:%M:%S")
+            elif universal.get("focus_lost") or universal.get("window_title") == OVERLAY_TITLE:
                 # paused: keep the last verdict on screen, just explain why
                 # the numbers are not refreshing
                 self.status_label.config(text="paused - click into your work, not me")

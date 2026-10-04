@@ -397,16 +397,24 @@ WEBAPP_DESCRIPTIONS.update({
 WEBAPP_DESCRIPTIONS.update(AI_CHAT_WEBAPP_DESCRIPTIONS)
 WEBAPP_CATEGORIES.update({key: "ai_chat" for key in AI_CHAT_WEBAPP_PROVIDERS})
 
-# AT-SPI app names that belong to the desktop shell itself, not to a
-# user's app; never report them as the focused app.
+# App names that belong to the desktop shell itself, not to a user's app.
+# These should be ignored by desktop activity judgments too: launchers and
+# panels (for example Plasma's application launcher) are transient system UI.
 SHELL_APPS = {
-    "kwin", "ksmserver", "plasmashell", "kded6", "kaccess", "ksecretd",
+    "kwin", "ksmserver", "plasmashell", "org.kde.plasmashell", "kded6", "kaccess", "ksecretd",
     "xembedsniproxy", "gmenudbusmenuproxy", "ActivityManager", "kwalletd",
     "polkit-kde-authentication-agent-1", "org_kde_powerdevil",
     "xdg-desktop-portal-kde", "xdg-desktop-portal-gtk", "kdeconnect.daemon",
     "xwaylandvideobridge", "kdeconnectd", "discover.notifier", "baloorunner",
-    "gcdemu", " kvm", "shell", "org.gnome.Shell", "gnome-shell",
+    "gcdemu", "kvm", "shell", "org.gnome.Shell", "gnome-shell",
 }
+_SHELL_APP_IDS = {re.sub(r"[^a-z0-9]", "", app.casefold()) for app in SHELL_APPS}
+
+
+def _is_shell_app(app_name):
+    """Whether an app ID identifies desktop shell/system UI."""
+    normalized = re.sub(r"[^a-z0-9]", "", (app_name or "").casefold())
+    return normalized in _SHELL_APP_IDS
 
 # Window-title suffixes -> canonical APP_METADATA key, so
 # "Page title - Chromium" identifies the app as a browser even if the

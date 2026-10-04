@@ -75,6 +75,90 @@ class BriefCheckinPolicyTests(unittest.TestCase):
 
 
 class InstalledAppContextTests(unittest.TestCase):
+    def test_desktop_shell_windows_are_skipped_by_activity_judgment(self):
+        shell_apps = (
+            "plasmashell",
+            "org.kde.plasmashell",
+            "org.gnome.Shell",
+            "gnome-shell",
+        )
+        for app_name in shell_apps:
+            with self.subTest(app=app_name), patch.object(
+                desktop,
+                "_active_window_kwin",
+                return_value={
+                    "app_class": app_name,
+                    "caption": "Application Launcher",
+                    "window_id": "shell-window",
+                    "desktop_file_id": "",
+                },
+            ), patch.object(
+                desktop, "_time_since_last_active", return_value=(0.0, "test")
+            ):
+                state = desktop.get_desktop_state("write a report")
+
+            self.assertTrue(state["universal"]["skip_decision"])
+            self.assertEqual(
+                state["universal"]["skip_decision_reason"], "desktop_shell"
+            )
+            self.assertEqual(state["universal"]["app_class"], "desktop_shell")
+            self.assertNotIn("app_metadata", state)
+
+    def test_gnome_shell_launcher_is_skipped_through_atspi_detection(self):
+        class ActiveState:
+            def contains(self, _state):
+                return True
+
+        class Frame:
+            def get_role(self):
+                return "frame"
+
+            def get_state_set(self):
+                return ActiveState()
+
+            def get_name(self):
+                return "Applications"
+
+        class App:
+            def get_name(self):
+                return "org.gnome.Shell"
+
+            def get_child_count(self):
+                return 1
+
+            def get_child_at_index(self, _index):
+                return Frame()
+
+        class Desktop:
+            def get_child_count(self):
+                return 1
+
+            def get_child_at_index(self, _index):
+                return App()
+
+        class FakeAtspi:
+            class Role:
+                FRAME = "frame"
+                DIALOG = "dialog"
+
+            class StateType:
+                ACTIVE = "active"
+
+            @staticmethod
+            def get_desktop(_index):
+                return Desktop()
+
+        with (
+            patch.object(desktop, "_ATSPI_OK", True),
+            patch.object(desktop, "Atspi", FakeAtspi),
+            patch.object(desktop, "_active_window_kwin", return_value=None),
+            patch.object(desktop, "_time_since_last_active", return_value=(0.0, "test")),
+        ):
+            state = desktop.get_desktop_state("write a report")
+
+        self.assertTrue(state["universal"]["skip_decision"])
+        self.assertEqual(state["universal"]["skip_decision_reason"], "desktop_shell")
+
     def test_installed_niche_apps_have_a_category_and_description(self):
         cases = {
             "ai.opencode.desktop": ("ai_coding", "opencode"),
